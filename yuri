@@ -1,0 +1,256 @@
+#!/usr/bin/env python
+# -*- coding: utf-8
+# http://stackoverflow.com/questions/4817963/creating-a-very-simple-irc-bot-with-ssl
+
+import socket
+import ssl
+import time
+import subprocess
+import re
+import json
+import urllib2
+import sqlite3
+import os.path
+import os, signal
+
+from config import *
+from datetime import datetime
+
+YTSEARCH="/home/ec2-user/bob/ytsearch.py"
+
+def ping(): # This is our first function! It will respond to server Pings.
+  ircsock.send("PONG :pingis\n")  
+
+def sendmsg(chan , msg): # This is the send message function, it simply sends messages to the channel.
+  ircsock.send("PRIVMSG "+ chan +" :"+ msg +"\n") 
+  print("PRIVMSG "+ chan +" :"+ msg +"\n") 
+
+def joinchan(chan): # This function is used to join channels.
+  ircsock.send("JOIN "+ chan +"\n")
+  print "JOIN "+ chan +"\n"
+
+def hello(): # This function responds to a user that inputs "Hello Mybot"
+  ircsock.send("PRIVMSG "+ channel +" :Hello!\n")
+
+def echo(): # just echo whatever it saw
+  print("PRIVMSG "+ channel +" :" + ircmsg + "\n")
+  ircsock.send("PRIVMSG "+ channel +" :" + ircmsg + "\n")
+  term = re.split('!echo', ircmsg)
+
+def ytsearch(searchterm): # just run the damn external script
+  try:
+    ytvid = subprocess.check_output(args=["%s -q \'%s\'" % (ytsearchcmd, searchterm)], shell=True, env={"PATH": "."} )
+    return(ytvid)
+  except:
+    sendmsg(channel,  "not found br0")
+
+def httpget(url):
+  request_headers = {
+  "Accept-Language": "en-US,en;q=0.5",
+#  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64; rv:40.0) Gecko/20100101 Firefox/40.0",
+  "User-Agent": "URMOM/5.0 (Dildo NT 10.0; WOW65; rv:4Ô.O) Gecko/2Ò1ÓÕ1Ö1 Firefux/40.Ø",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Referer": "http://thewebsite.com",
+  "Connection": "keep-alive" 
+  }
+
+  request = urllib2.Request(url, headers=request_headers)
+  contents = urllib2.urlopen(request).read()
+  return(contents)
+
+
+
+def foundSpotify(ircmsg):
+  splitmsg = re.split(':',ircmsg)
+  sptrackid = splitmsg[4]
+  sptrackurl = "https://api.spotify.com/v1/tracks/%s" % sptrackid
+  sptrackjson = httpget(sptrackurl)
+  sptrackinfo = json.loads(sptrackjson)
+
+  spartist = sptrackinfo['album']['artists'][0]['name']
+  sptitle = sptrackinfo['name']
+  searchstring = "%s %s" % (spartist, sptitle)
+  #sendmsg(channel, searchstring)
+  yturl = ytsearch(searchstring)
+  print spartist
+  print sptitle
+  print yturl
+  try:
+    outputstring = "%s - %s  %s" % (spartist.encode('utf-8'), sptitle.encode('utf-8'), yturl.encode('utf-8'))
+    sendmsg(channel, outputstring)
+  except:
+    pass
+
+def nsauth():
+#  text_file = open("Output.txt", "w")
+#  text_file.write("PRIVMSG nickserv identify" + " " + nsnick + " " + nspw + "\n")
+#  text_file.close()
+  print "PRIVMSG nickserv identify" + " " + nsnick + " " + nspw + "\n"
+  ircsock.send("PRIVMSG nickserv identify" + " " + nsnick + " " + nspw + "\n")
+
+
+
+
+def addUserToDb(udb, nick, ident, host):
+  now = datetime.now().strftime('%s')
+  c = udb.cursor()
+  c.execute("INSERT INTO users(nick, ident, host, lastseen, accesslvl) VALUES (?, ?, ?, ?, 4)", (nick, ident, host, now))
+  udb.commit()
+
+
+
+
+
+def userjoined(udb, userjoinedstring):
+  joinstring = re.split(':|!|@|\s', userjoinedstring)
+  joinednick = joinstring[1]
+  joinedident = joinstring[2]
+  joinedhost = joinstring[3]
+
+
+  if not isUserInDb(udb, joinedident, joinedhost):
+    addUserToDb(udb, joinednick, joinedident, joinedhost)
+
+
+
+def getUserAccessLvl(udb, ident, host):
+  c = udb.cursor()
+  c.execute("SELECT accesslvl FROM users WHERE ident=? and host=?", (ident, host))
+  alvl = c.fetchone()[0]
+  alvl = int(alvl)
+  return (alvl)
+
+
+def isUserInDb(udb, ident, host):
+  c = udb.cursor()
+  rows_count = c.execute("SELECT * from users where ident=? and host=?", (ident, host)).fetchone()
+  if rows_count > 1:
+    return 1
+  else:
+    return 0
+
+def writePidFile():
+    pid = str(os.getpid())
+    pidfile=botnick + ".pid"
+    f = open(pidfile, 'w')
+    f.write(pid)
+    f.close()
+
+
+def hupIt():
+  pid = str(os.getpid())
+  os.kill(pid, signal.SIGHUP)
+
+
+def createUserDb(dbfile):
+  now = datetime.now().strftime('%s')
+  conn = sqlite3.connect(dbfile)
+  c = conn.cursor()
+  c.execute(
+    '''CREATE TABLE users (
+      uid INTEGER PRIMARY KEY AUTOINCREMENT,
+      nick TEXT,
+      ident TEXT,
+      host TEXT,
+      lastseen TEXT,
+      accesslvl INTEGER)'''
+  )
+
+  c.execute( "INSERT INTO users VALUES (0, ?, ?, ?, ?, 0)", (masternick, masterident, masterhost, now) )
+
+  conn.commit()
+  conn.close()
+  
+
+def botQuit(udb, ircmsg):
+  string = re.split(':|!|@|\s', ircmsg)
+  nick = string[1]
+  ident = string[2]
+  host = string[3]
+
+ 
+  alvl = getUserAccessLvl(udb, ident, host)
+  
+#  print alvl 
+#  alvl=int(alvl)
+  if alvl == 0:
+    sendmsg(channel, "I quit")
+    exit(0)
+  else:
+    sendmsg(channel, "You can't do that.")
+
+
+def sanitize(ircmsg):
+  chars_to_remove = ['\'', '"', '?']
+  ircmsg=ircmsg.translate(None, ''.join(chars_to_remove))
+  return ircmsg
+
+
+##########
+# ACTUAL SCRIPT STARTS HERE
+##########
+
+# write pidfile
+writePidFile()
+
+# check if userdb file exists; if not, then create it.
+
+if os.path.isfile(userdbfile):
+  conn = sqlite3.connect(userdbfile)
+else:
+  createUserDb(userdbfile)
+
+
+
+udb = sqlite3.connect(userdbfile)
+
+
+
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((server, port)) # Here we connect to the server using the port 6667
+ircsock = ssl.wrap_socket(s)
+ircsock.send("USER "+ botnick +" "+ botnick +" "+ botnick + ircname + "\n") # user authentication
+ircsock.send("NICK "+ botnick +"\n") # here we actually assign the nick to the bot
+
+time.sleep(2)  # or else it tries to join before registration is complete
+
+nsauth()
+
+joinchan(channel) # Join the channel using the functions we previously defined
+
+while 1: # Be careful with these! it might send you to an infinite loop
+  ircmsg = ircsock.recv(2048) # receive data from the server
+  ircmsg = ircmsg.strip('\n\r') # removing any unnecessary linebreaks.
+  print(ircmsg) # Here we print what's coming from the server
+
+
+  if ircmsg.find("PING :") != -1: # if the server pings us then we've got to respond!
+    ping()
+
+  if ircmsg.find("JOIN :%s" % channel) != -1: 
+    userjoined(udb, ircmsg)
+
+  if ircmsg.find("PRIVMSG " + channel + " :!yt ") != -1:
+    msg = re.split('!yt ', ircmsg)
+    searchterm = str(msg[1])
+    searchterm = sanitize(searchterm)
+    sendmsg(channel,  ytsearch(searchterm))
+
+  if ircmsg.find("PRIVMSG " + channel + " :" + botnick +": quit") != -1:
+    botQuit(udb, ircmsg)
+    
+
+  if ircmsg.find("PRIVMSG " + channel + " :" + botnick +": hello ") != -1: # If we can find "Hello Mybot" it will call the function hello()
+    hello()
+#    exit(1)
+
+  if ircmsg.find("PRIVMSG " + channel + " :spotify:track:") != -1:
+    ircmsg = sanitize(ircmsg)
+    foundSpotify(ircmsg)
+
+#  if ircmsg.find(botnick + ": quit") != -1: 
+#    ircsock.send("QUIT quitting time")
+#    ircsock.shutdown(1)
+#    ircsock.close()
+
